@@ -39,6 +39,5 @@ jobs:
 
       - run: bun run package:smoke
 
+      # Publish via npm trusted publishing (OIDC) — no token required.
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
