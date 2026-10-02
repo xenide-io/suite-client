@@ -1,5 +1,7 @@
 import { appErrorFromResponse, formatAppError } from '../errors/normalize';
 
+export type ApiFetchInit = RequestInit & { skipAuth?: boolean };
+
 export interface ApiClientConfig {
   /** localStorage key namespace, e.g. `tt` or `tides`. */
   storagePrefix: string;
@@ -16,14 +18,17 @@ export interface ApiClientConfig {
   workspaceCookieDomain?: string;
   /** Fired when the active workspace changes in this tab. */
   onWorkspaceChange?: (id: string | null) => void;
+  /** Fired during sign-out before storage is cleared. */
+  onSignOut?: () => void;
+  /** Clear the workspace key on sign-out (default `true`). */
+  clearWorkspaceOnSignOut?: boolean;
+  /** Extra localStorage keys removed on sign-out (e.g. portal app tokens). */
+  extraStorageKeysOnClear?: string[];
   /** sessionStorage key prefixes to clear on sign-out. */
   sessionStorageClearPrefixes?: string[];
+  /** Refuse to send the session to an unexpected absolute origin. */
+  enforceSameOrigin?: boolean;
 }
-
-export type ApiFetch = (
-  path: string,
-  options?: RequestInit,
-) => Promise<Response>;
 
 /**
  * Build a browser API client scoped to one ShellStack app. Every app shares the
@@ -51,6 +56,7 @@ export function createApiClient(config: ApiClientConfig) {
     config.refreshTokenKey ?? `${config.storagePrefix}_refresh_token`;
   const WORKSPACE_KEY =
     config.workspaceKey ?? `${config.storagePrefix}_active_workspace_id`;
+  const CLEAR_WORKSPACE = config.clearWorkspaceOnSignOut ?? true;
 
   let accessToken: string | null = null;
   let refreshToken: string | null = null;
@@ -97,12 +103,14 @@ export function createApiClient(config: ApiClientConfig) {
     authFailureHandler?.();
   }
 
-  function setTokens(access: string, refresh: string): void {
+  function setTokens(access: string, refresh?: string | null): void {
     accessToken = access;
-    refreshToken = refresh;
+    authFailureFired = false;
+    if (refresh !== undefined) refreshToken = refresh;
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(ACCESS_KEY, access);
-      window.localStorage.setItem(REFRESH_KEY, refresh);
+      if (refresh) window.localStorage.setItem(REFRESH_KEY, refresh);
+      else if (refresh !== undefined) window.localStorage.removeItem(REFRESH_KEY);
     }
   }
 
@@ -120,6 +128,10 @@ export function createApiClient(config: ApiClientConfig) {
       refreshToken = window.localStorage.getItem(REFRESH_KEY);
     }
     return refreshToken;
+  }
+
+  function hasAccessToken(): boolean {
+    return Boolean(getAccessToken());
   }
 
   function setActiveWorkspaceId(
@@ -158,13 +170,17 @@ export function createApiClient(config: ApiClientConfig) {
   }
 
   function clearAuth(): void {
+    config.onSignOut?.();
     accessToken = null;
     refreshToken = null;
     activeWorkspaceId = null;
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(ACCESS_KEY);
       window.localStorage.removeItem(REFRESH_KEY);
-      window.localStorage.removeItem(WORKSPACE_KEY);
+      if (CLEAR_WORKSPACE) window.localStorage.removeItem(WORKSPACE_KEY);
+      for (const key of config.extraStorageKeysOnClear ?? []) {
+        window.localStorage.removeItem(key);
+      }
       const prefixes = config.sessionStorageClearPrefixes ?? [];
       if (prefixes.length > 0) {
         try {
@@ -232,15 +248,16 @@ export function createApiClient(config: ApiClientConfig) {
 
   async function apiFetch(
     path: string,
-    options: RequestInit = {},
+    init: ApiFetchInit = {},
   ): Promise<Response> {
+    const { skipAuth, ...requestInit } = init;
     const token = getAccessToken();
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      ...(options.headers as Record<string, string>),
+      ...(requestInit.headers as Record<string, string>),
     };
 
-    const body = options.body;
+    const body = requestInit.body;
     const isFormData =
       typeof FormData !== 'undefined' && body instanceof FormData;
 
@@ -248,21 +265,35 @@ export function createApiClient(config: ApiClientConfig) {
       headers['Content-Type'] = 'application/json';
     }
 
-    if (token) {
+    if (token && !skipAuth) {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
     const wsId = getActiveWorkspaceId();
-    if (wsId) {
+    if (wsId && !skipAuth) {
       headers['X-Active-Workspace-Id'] = wsId;
     }
 
     const url = path.startsWith('http') ? path : `${API_URL}${path}`;
+    if (
+      config.enforceSameOrigin &&
+      !skipAuth &&
+      path.startsWith('http') &&
+      !url.startsWith(API_URL)
+    ) {
+      throw new Error('Refusing to send the session to an unexpected origin.');
+    }
 
     async function doFetch(): Promise<Response> {
       try {
-        return await fetch(url, { ...options, headers });
-      } catch {
+        return await fetch(url, { ...requestInit, headers });
+      } catch (error) {
+        if (
+          init.signal?.aborted ||
+          (error instanceof DOMException && error.name === 'AbortError')
+        ) {
+          throw error;
+        }
         throw new Error(
           `Could not reach the API at ${API_URL}. Is the Django backend running?`,
         );
@@ -271,7 +302,7 @@ export function createApiClient(config: ApiClientConfig) {
 
     let res = await doFetch();
 
-    if (res.status === 401 && token) {
+    if (res.status === 401 && token && !skipAuth) {
       const refreshed = await refreshAccessToken();
       if (refreshed) {
         const newToken = getAccessToken();
@@ -279,9 +310,10 @@ export function createApiClient(config: ApiClientConfig) {
           headers['Authorization'] = `Bearer ${newToken}`;
         }
         res = await doFetch();
-        if (res.status === 401) {
-          triggerAuthFailure();
-        }
+      }
+      if (res.status === 401) {
+        clearAuth();
+        triggerAuthFailure();
       }
     }
 
@@ -294,11 +326,11 @@ export function createApiClient(config: ApiClientConfig) {
   }
 
   const api = {
-    get: (path: string) => apiFetch(path),
+    get: (path: string, init?: ApiFetchInit) => apiFetch(path, init),
 
-    post: (path: string, body?: unknown, options: RequestInit = {}) =>
+    post: (path: string, body?: unknown, init: ApiFetchInit = {}) =>
       apiFetch(path, {
-        ...options,
+        ...init,
         method: 'POST',
         body:
           body instanceof FormData
@@ -308,8 +340,9 @@ export function createApiClient(config: ApiClientConfig) {
               : undefined,
       }),
 
-    put: (path: string, body?: unknown) =>
+    put: (path: string, body?: unknown, init: ApiFetchInit = {}) =>
       apiFetch(path, {
+        ...init,
         method: 'PUT',
         body:
           body instanceof FormData
@@ -319,8 +352,9 @@ export function createApiClient(config: ApiClientConfig) {
               : undefined,
       }),
 
-    patch: (path: string, body?: unknown) =>
+    patch: (path: string, body?: unknown, init: ApiFetchInit = {}) =>
       apiFetch(path, {
+        ...init,
         method: 'PATCH',
         body:
           body instanceof FormData
@@ -330,7 +364,8 @@ export function createApiClient(config: ApiClientConfig) {
               : undefined,
       }),
 
-    delete: (path: string) => apiFetch(path, { method: 'DELETE' }),
+    delete: (path: string, init: ApiFetchInit = {}) =>
+      apiFetch(path, { ...init, method: 'DELETE' }),
   };
 
   return {
@@ -339,6 +374,7 @@ export function createApiClient(config: ApiClientConfig) {
     setTokens,
     getAccessToken,
     getRefreshToken,
+    hasAccessToken,
     setActiveWorkspaceId,
     getActiveWorkspaceId,
     restoreWorkspace,
@@ -347,6 +383,9 @@ export function createApiClient(config: ApiClientConfig) {
     refreshAccessToken,
     parseApiError,
     api,
+    // Aliases used by Kraken/Shelly.
+    restoreSession: restoreTokens,
+    clearSession: clearAuth,
   };
 }
 
