@@ -11,13 +11,20 @@ const packageRoot = path.resolve(
 const packageJson = JSON.parse(
   readFileSync(path.join(packageRoot, 'package.json'), 'utf8'),
 );
-const packed = JSON.parse(
+// npm may return an array (`[{ ... }]`) or an object keyed by name depending
+// on version; normalise to the first pack result.
+const packOutput = JSON.parse(
   execFileSync('npm', ['pack', '--dry-run', '--json'], {
     cwd: packageRoot,
     encoding: 'utf8',
   }),
-)[0];
-const packedPaths = new Set(packed.files.map(({ path: filePath }) => filePath));
+);
+const packed = Array.isArray(packOutput)
+  ? packOutput[0]
+  : Object.values(packOutput)[0];
+const packedPaths = new Set(
+  (packed?.files ?? []).map(({ path: filePath }) => filePath),
+);
 
 const expectedFiles = ['README.md', 'LICENSE'];
 
