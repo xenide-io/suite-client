@@ -1,6 +1,6 @@
 {
   "name": "@xenide-io/suite-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic platform layer shared across Xenide ShellStack apps — API client, auth, workspace, cross-app sync, notifications, errors.",
   "author": "Xenide",
   "license": "MIT",
