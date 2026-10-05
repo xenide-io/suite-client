@@ -9,6 +9,7 @@ export * from './workspace/create-workspace-appearance-api';
 export * from './sync/create-cross-app-sync';
 export * from './sync/create-live-refresh';
 export * from './notifications/create-notifications-client';
+export * from './notifications/create-web-push-client';
 export * from './ai/suite-ai-job';
 export * from './webhooks/webhook-activity-actions';
 export * from './seo/create-json-ld';
