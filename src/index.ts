@@ -1,4 +1,5 @@
 export * from './errors';
+export * from './analytics';
 export * from './api/create-api-client';
 export * from './auth/create-auth-return-path';
 export * from './workspace/access';

@@ -6,6 +6,11 @@ export interface AuthReturnPathConfig {
   defaultNext?: string;
   portalCallbackPath?: string;
   redeemPath?: string;
+  /** Forward the completed cross-app switch to the app's analytics client. */
+  onAnalyticsEvent?: (
+    event: string,
+    properties?: Record<string, unknown>,
+  ) => void;
 }
 
 export interface PortalHandoffPayload {
@@ -112,6 +117,14 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
 
   let redeemInflight: Promise<PortalHandoffRead> | null = null;
 
+  function track(event: string, properties?: Record<string, unknown>): void {
+    try {
+      config.onAnalyticsEvent?.(event, properties);
+    } catch {
+      // Analytics is non-critical.
+    }
+  }
+
   async function redeemPortalHandoff(
     apiUrl: string,
     fallbackNext = DEFAULT_NEXT,
@@ -127,12 +140,17 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
         },
         body: JSON.stringify({ code }),
       });
-      if (!response.ok) return { code: null, token: null, refresh: null, next };
+      if (!response.ok) {
+        track('Cross-App Switch', { success: false });
+        return { code: null, token: null, refresh: null, next };
+      }
       const data = (await response.json()) as PortalHandoffPayload;
       sessionStorage.removeItem(HANDOFF_KEY);
+      const redeemedToken = data.token || data.access || null;
+      track('Cross-App Switch', { success: Boolean(redeemedToken) });
       return {
         code: null,
-        token: data.token || data.access || null,
+        token: redeemedToken,
         refresh: data.refresh || null,
         next,
       };

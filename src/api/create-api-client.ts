@@ -2,6 +2,12 @@ import { appErrorFromResponse, formatAppError } from '../errors/normalize';
 
 export type ApiFetchInit = RequestInit & { skipAuth?: boolean };
 
+/** Optional analytics sink forwarded client lifecycle events (e.g. `analytics.capture`). */
+export type ApiAnalyticsEventSink = (
+  event: string,
+  properties?: Record<string, unknown>,
+) => void;
+
 export interface ApiClientConfig {
   /** localStorage key namespace, e.g. `tt` or `tides`. */
   storagePrefix: string;
@@ -28,6 +34,18 @@ export interface ApiClientConfig {
   sessionStorageClearPrefixes?: string[];
   /** Refuse to send the session to an unexpected absolute origin. */
   enforceSameOrigin?: boolean;
+  /**
+   * Extra headers to attach to every request. Used to forward the PostHog
+   * identity/session ids (`X-POSTHOG-DISTINCT-ID` / `X-POSTHOG-SESSION-ID`)
+   * so server-side events share the browser identity. Empty values are dropped.
+   */
+  getContextHeaders?: () => Record<string, string>;
+  /**
+   * Forward client lifecycle events (`Session Expired`, `Workspace Switched`,
+   * `User Logged Out`) to the app's analytics client. Kept as a plain callback
+   * so this package never imports an analytics implementation.
+   */
+  onAnalyticsEvent?: ApiAnalyticsEventSink;
 }
 
 /**
@@ -92,6 +110,29 @@ export function createApiClient(config: ApiClientConfig) {
     document.cookie = `${SHARED_WORKSPACE_COOKIE}=${value}; path=/; max-age=${maxAge}; SameSite=Lax${domain}`;
   }
 
+  function contextHeaders(): Record<string, string> {
+    try {
+      return config.getContextHeaders?.() ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  function applyContextHeaders(headers: Record<string, string>): void {
+    for (const [key, value] of Object.entries(contextHeaders())) {
+      if (value) headers[key] = value;
+    }
+  }
+
+  /** Best-effort analytics forwarder — never lets analytics break auth flows. */
+  function track(event: string, properties?: Record<string, unknown>): void {
+    try {
+      config.onAnalyticsEvent?.(event, properties);
+    } catch {
+      // Analytics is non-critical.
+    }
+  }
+
   function onAuthFailure(handler: () => void): void {
     authFailureHandler = handler;
     authFailureFired = false;
@@ -100,6 +141,10 @@ export function createApiClient(config: ApiClientConfig) {
   function triggerAuthFailure(): void {
     if (authFailureFired) return;
     authFailureFired = true;
+    track('Session Expired', {
+      path:
+        typeof window !== 'undefined' ? window.location.pathname : undefined,
+    });
     authFailureHandler?.();
   }
 
@@ -138,7 +183,8 @@ export function createApiClient(config: ApiClientConfig) {
     id: string | null,
     options?: { share?: boolean },
   ): void {
-    const changed = activeWorkspaceId !== id;
+    const previousWorkspaceId = activeWorkspaceId;
+    const changed = previousWorkspaceId !== id;
     activeWorkspaceId = id;
     if (typeof window !== 'undefined') {
       if (id) {
@@ -146,7 +192,19 @@ export function createApiClient(config: ApiClientConfig) {
       } else {
         window.localStorage.removeItem(WORKSPACE_KEY);
       }
-      if (changed) config.onWorkspaceChange?.(id);
+      if (changed) {
+        config.onWorkspaceChange?.(id);
+        // Only a move between two real workspaces is a switch; resolving the
+        // initial workspace (null → id) and clearing (id → null) are not.
+        if (id && previousWorkspaceId) {
+          track('Workspace Switched', {
+            from_workspace_id: previousWorkspaceId,
+            to_workspace_id: id,
+            is_shared: Boolean(options?.share),
+            origin: 'api_client',
+          });
+        }
+      }
     }
     // Only an explicit choice should update the suite-wide selection; a fallback
     // default must not clobber the workspace another app is using.
@@ -169,8 +227,13 @@ export function createApiClient(config: ApiClientConfig) {
     }
   }
 
-  function clearAuth(): void {
+  function clearAuth(options?: {
+    origin?: 'user' | 'session_expired';
+  }): void {
     config.onSignOut?.();
+    if ((options?.origin ?? 'user') !== 'session_expired') {
+      track('User Logged Out', { origin: options?.origin ?? 'user' });
+    }
     accessToken = null;
     refreshToken = null;
     activeWorkspaceId = null;
@@ -222,16 +285,18 @@ export function createApiClient(config: ApiClientConfig) {
     }
 
     try {
+      const refreshHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      };
+      applyContextHeaders(refreshHeaders);
       const res = await fetch(`${API_URL}${config.refreshPath}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
+        headers: refreshHeaders,
         body: JSON.stringify({ refresh }),
       });
       if (!res.ok) {
-        clearAuth();
+        clearAuth({ origin: 'session_expired' });
         triggerAuthFailure();
         return false;
       }
@@ -240,7 +305,7 @@ export function createApiClient(config: ApiClientConfig) {
       authFailureFired = false;
       return true;
     } catch {
-      clearAuth();
+      clearAuth({ origin: 'session_expired' });
       triggerAuthFailure();
       return false;
     }
@@ -273,6 +338,8 @@ export function createApiClient(config: ApiClientConfig) {
     if (wsId && !skipAuth) {
       headers['X-Active-Workspace-Id'] = wsId;
     }
+
+    applyContextHeaders(headers);
 
     const url = path.startsWith('http') ? path : `${API_URL}${path}`;
     if (
@@ -312,7 +379,7 @@ export function createApiClient(config: ApiClientConfig) {
         res = await doFetch();
       }
       if (res.status === 401) {
-        clearAuth();
+        clearAuth({ origin: 'session_expired' });
         triggerAuthFailure();
       }
     }
