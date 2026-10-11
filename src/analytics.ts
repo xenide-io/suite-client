@@ -64,8 +64,12 @@ export function createAnalyticsClient(config: AnalyticsClientConfig) {
       defaults,
       person_profiles: 'identified_only',
       autocapture: true,
-      capture_pageview: true,
-      capture_pageleave: true,
+      // Pageviews are captured explicitly via `pageview()` (mount + route
+      // change) so every `$pageview` carries the app/super-properties and the
+      // behaviour is identical across all apps. The SDK's own pageview capture
+      // is disabled to avoid double-counting and `defaults`-dependent behaviour.
+      capture_pageview: false,
+      capture_pageleave: false,
       persistence: 'localStorage+cookie',
       cross_subdomain_cookie: true,
     });
@@ -147,6 +151,11 @@ export function createAnalyticsClient(config: AnalyticsClientConfig) {
     if (sessionId) headers['X-POSTHOG-SESSION-ID'] = sessionId;
     return headers;
   }
+
+  // Initialise as soon as the module loads on the browser (idempotent), so the
+  // SDK and identity/session ids are ready before the first API request and the
+  // first `identify()` call. SSR is a no-op.
+  if (isBrowser()) init();
 
   return {
     init,
