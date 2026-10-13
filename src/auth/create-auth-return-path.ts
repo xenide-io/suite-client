@@ -95,8 +95,6 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
   }
 
   function readPortalHandoff(fallbackNext = DEFAULT_NEXT): PortalHandoffRead {
-    const cached = cachedHandoff(fallbackNext);
-    if (cached) return cached;
     const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
     const query = new URLSearchParams(window.location.search);
     const nextRaw = hash.get('next') || query.get('next');
@@ -110,12 +108,13 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
       sessionStorage.setItem(HANDOFF_KEY, JSON.stringify(result));
     }
     // The callback's hard location.replace removes the fragment from history.
-    // Calling history.replaceState here makes Next.js remount the callback before
-    // its one-time code redemption has completed.
-    return result;
+    return result.code || result.token
+      ? result
+      : cachedHandoff(fallbackNext) ?? result;
   }
 
   let redeemInflight: Promise<PortalHandoffRead> | null = null;
+  let redeemKey = '';
 
   function track(event: string, properties?: Record<string, unknown>): void {
     try {
@@ -129,8 +128,13 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
     apiUrl: string,
     fallbackNext = DEFAULT_NEXT,
   ): Promise<PortalHandoffRead> {
-    redeemInflight ??= (async () => {
-      const { code, token, refresh, next } = readPortalHandoff(fallbackNext);
+    const handoff = readPortalHandoff(fallbackNext);
+    const key = JSON.stringify([apiUrl, handoff]);
+    sessionStorage.removeItem(HANDOFF_KEY);
+    if (redeemInflight && redeemKey === key) return redeemInflight;
+    redeemKey = key;
+    const { code, token, refresh, next } = handoff;
+    redeemInflight = (async () => {
       if (!code) return { code: null, token, refresh, next };
       const response = await fetch(`${apiUrl.replace(/\/$/, '')}${REDEEM_PATH}`, {
         method: 'POST',
@@ -145,7 +149,6 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
         return { code: null, token: null, refresh: null, next };
       }
       const data = (await response.json()) as PortalHandoffPayload;
-      sessionStorage.removeItem(HANDOFF_KEY);
       const redeemedToken = data.token || data.access || null;
       track('Cross-App Switch', { success: Boolean(redeemedToken) });
       return {
@@ -154,7 +157,15 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
         refresh: data.refresh || null,
         next,
       };
-    })();
+    })()
+      .catch(() => {
+        track('Cross-App Switch', { success: false });
+        return { code: null, token: null, refresh: null, next };
+      })
+      .then((result) => {
+        if (!result.token && redeemKey === key) redeemInflight = null;
+        return result;
+      });
     return redeemInflight;
   }
 
