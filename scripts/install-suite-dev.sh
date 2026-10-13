@@ -57,4 +57,8 @@ tar -C "$SUITE_DIR" -cf - \
   --exclude='*.tsbuildinfo' \
   . | tar -C "$TARGET" -xf -
 
-echo "install-suite-dev: done"
+# Same as install-theme-dev: drop Vite's prebundle so new exports are visible.
+NODE_MODULES_DIR=$(CDPATH= cd -- "$(dirname "$(dirname "$TARGET")")" && pwd)
+rm -rf "$NODE_MODULES_DIR/.vite"
+
+echo "install-suite-dev: done (cleared $NODE_MODULES_DIR/.vite)"
