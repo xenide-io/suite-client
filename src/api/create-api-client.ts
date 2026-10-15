@@ -79,6 +79,7 @@ export function createApiClient(config: ApiClientConfig) {
   let accessToken: string | null = null;
   let refreshToken: string | null = null;
   let activeWorkspaceId: string | null = null;
+  const etagBodies = new Map<string, { etag: string; body: string }>();
 
   let authFailureHandler: (() => void) | null = null;
   let authFailureFired = false;
@@ -193,6 +194,7 @@ export function createApiClient(config: ApiClientConfig) {
         window.localStorage.removeItem(WORKSPACE_KEY);
       }
       if (changed) {
+        etagBodies.clear();
         config.onWorkspaceChange?.(id);
         // Only a move between two real workspaces is a switch; resolving the
         // initial workspace (null → id) and clearing (id → null) are not.
@@ -237,6 +239,7 @@ export function createApiClient(config: ApiClientConfig) {
     accessToken = null;
     refreshToken = null;
     activeWorkspaceId = null;
+    etagBodies.clear();
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(ACCESS_KEY);
       window.localStorage.removeItem(REFRESH_KEY);
@@ -341,6 +344,13 @@ export function createApiClient(config: ApiClientConfig) {
 
     applyContextHeaders(headers);
 
+    const method = (requestInit.method ?? 'GET').toUpperCase();
+    const etagKey = `${method}:${wsId ?? ''}:${path}`;
+    if (method === 'GET') {
+      const hit = etagBodies.get(etagKey);
+      if (hit) headers['If-None-Match'] = hit.etag;
+    }
+
     const url = path.startsWith('http') ? path : `${API_URL}${path}`;
     if (
       config.enforceSameOrigin &&
@@ -381,6 +391,27 @@ export function createApiClient(config: ApiClientConfig) {
       if (res.status === 401) {
         clearAuth({ origin: 'session_expired' });
         triggerAuthFailure();
+      }
+    }
+
+    if (method === 'GET' && res.status === 304) {
+      const hit = etagBodies.get(etagKey);
+      if (hit) {
+        return new Response(hit.body, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json', ETag: hit.etag },
+        });
+      }
+    }
+    if (method === 'GET' && res.ok) {
+      const etag = res.headers.get('ETag');
+      if (etag) {
+        const cachedBody = await res.clone().text();
+        if (etagBodies.size >= 40) {
+          const oldest = etagBodies.keys().next().value;
+          if (oldest) etagBodies.delete(oldest);
+        }
+        etagBodies.set(etagKey, { etag, body: cachedBody });
       }
     }
 

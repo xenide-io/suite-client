@@ -124,18 +124,11 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
     }
   }
 
-  async function redeemPortalHandoff(
+  async function requestSwitchCode(
     apiUrl: string,
-    fallbackNext = DEFAULT_NEXT,
-  ): Promise<PortalHandoffRead> {
-    const handoff = readPortalHandoff(fallbackNext);
-    const key = JSON.stringify([apiUrl, handoff]);
-    sessionStorage.removeItem(HANDOFF_KEY);
-    if (redeemInflight && redeemKey === key) return redeemInflight;
-    redeemKey = key;
-    const { code, token, refresh, next } = handoff;
-    redeemInflight = (async () => {
-      if (!code) return { code: null, token, refresh, next };
+    code: string,
+  ): Promise<PortalHandoffPayload | 'dead' | 'retry'> {
+    try {
       const response = await fetch(`${apiUrl.replace(/\/$/, '')}${REDEEM_PATH}`, {
         method: 'POST',
         headers: {
@@ -144,28 +137,61 @@ export function createAuthReturnPath(config: AuthReturnPathConfig) {
         },
         body: JSON.stringify({ code }),
       });
-      if (!response.ok) {
+      if (!response.ok) return 'dead';
+      return (await response.json()) as PortalHandoffPayload;
+    } catch {
+      return 'retry';
+    }
+  }
+
+  async function redeemPortalHandoff(
+    apiUrl: string,
+    fallbackNext = DEFAULT_NEXT,
+  ): Promise<PortalHandoffRead> {
+    const handoff = readPortalHandoff(fallbackNext);
+    const key = JSON.stringify([apiUrl, handoff]);
+    if (redeemInflight && redeemKey === key) {
+      return redeemInflight.then((result) => {
+        if (result.token) sessionStorage.removeItem(HANDOFF_KEY);
+        return result;
+      });
+    }
+    redeemKey = key;
+    const { code, token, refresh, next } = handoff;
+    redeemInflight = (async () => {
+      if (!code) {
+        sessionStorage.removeItem(HANDOFF_KEY);
+        return { code: null, token, refresh, next };
+      }
+      let outcome = await requestSwitchCode(apiUrl, code);
+      if (outcome === 'retry') outcome = await requestSwitchCode(apiUrl, code);
+      if (outcome === 'retry') {
         track('Cross-App Switch', { success: false });
         return { code: null, token: null, refresh: null, next };
       }
-      const data = (await response.json()) as PortalHandoffPayload;
-      const redeemedToken = data.token || data.access || null;
-      track('Cross-App Switch', { success: Boolean(redeemedToken) });
+      if (outcome === 'dead') {
+        sessionStorage.removeItem(HANDOFF_KEY);
+        track('Cross-App Switch', { success: false });
+        return { code: null, token: null, refresh: null, next };
+      }
+      const redeemedToken = outcome.token || outcome.access || null;
+      if (!redeemedToken) {
+        sessionStorage.removeItem(HANDOFF_KEY);
+        track('Cross-App Switch', { success: false });
+        return { code: null, token: null, refresh: null, next };
+      }
+      sessionStorage.removeItem(HANDOFF_KEY);
+      track('Cross-App Switch', { success: true });
       return {
         code: null,
         token: redeemedToken,
-        refresh: data.refresh || null,
+        refresh: outcome.refresh || null,
         next,
       };
-    })()
-      .catch(() => {
-        track('Cross-App Switch', { success: false });
-        return { code: null, token: null, refresh: null, next };
-      })
-      .then((result) => {
-        if (!result.token && redeemKey === key) redeemInflight = null;
-        return result;
-      });
+    })().then((result) => {
+      if (!result.token && redeemKey === key) redeemInflight = null;
+      return result;
+    });
     return redeemInflight;
   }
 
