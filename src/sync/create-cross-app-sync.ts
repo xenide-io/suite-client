@@ -8,6 +8,8 @@ export interface CrossAppSyncConfig {
   checkpointPath: string;
   /** Poll interval while the tab is visible (ms). */
   pollMs?: number;
+  /** Reset the checkpoint baseline when the active workspace changes. */
+  getScope?: () => string | null;
 }
 
 type SyncCheckpoint = {
@@ -35,49 +37,60 @@ export function createCrossAppSync(config: CrossAppSyncConfig) {
   const subscribers: Array<{
     topic?: CrossAppSyncTopic;
     callback: () => void;
-    lastSync: number;
   }> = [];
 
   let pollInterval: number | null = null;
   let pollListeners = 0;
+  let inFlight = false;
+  let primed = false;
+  let scope: string | null | undefined;
+  let lastRequestedScope: string | null | undefined;
+  let lastRequestedAt: number | undefined;
 
   async function fetchCheckpoint(): Promise<SyncCheckpoint | null> {
+    if (inFlight || document.visibilityState !== 'visible') return null;
+    const requestScope = config.getScope?.();
+    if (
+      requestScope === lastRequestedScope &&
+      lastRequestedAt !== undefined &&
+      Date.now() - lastRequestedAt < pollMs
+    )
+      return null;
+    inFlight = true;
+    lastRequestedScope = requestScope;
+    lastRequestedAt = Date.now();
     try {
       const res = await config.api.get(config.checkpointPath);
       if (!res.ok) return null;
-      return (await res.json()) as SyncCheckpoint;
+      const data = (await res.json()) as SyncCheckpoint;
+      if (requestScope !== config.getScope?.()) return null;
+      if (scope !== requestScope) {
+        primed = false;
+        scope = requestScope;
+      }
+      return data;
     } catch {
       return null;
-    }
-  }
-
-  function notify(topic: CrossAppSyncTopic): void {
-    for (const sub of subscribers) {
-      if (!sub.topic || sub.topic === topic) {
-        if (lastKnown[topic] > sub.lastSync) {
-          sub.lastSync = lastKnown[topic];
-          sub.callback();
-        }
-      }
+    } finally {
+      inFlight = false;
     }
   }
 
   function checkAndNotify(data: SyncCheckpoint): void {
-    const tasks = data.tasks_synced_at || 0;
-    const time = data.time_synced_at || 0;
-    const integration = data.integration_synced_at || 0;
-
-    if (tasks > lastKnown.tasks) {
-      lastKnown.tasks = tasks;
-      notify('tasks');
-    }
-    if (time > lastKnown.time) {
-      lastKnown.time = time;
-      notify('time');
-    }
-    if (integration > lastKnown.integration) {
-      lastKnown.integration = integration;
-      notify('integration');
+    const next: Record<CrossAppSyncTopic, number> = {
+      tasks: data.tasks_synced_at || 0,
+      time: data.time_synced_at || 0,
+      integration: data.integration_synced_at || 0,
+    };
+    const changed = (['tasks', 'time', 'integration'] as const).filter(
+      (topic) => primed && next[topic] > lastKnown[topic],
+    );
+    Object.assign(lastKnown, next);
+    primed = true;
+    // One callback per subscriber, even when several topics moved together.
+    for (const sub of subscribers) {
+      if (changed.some((topic) => !sub.topic || sub.topic === topic))
+        sub.callback();
     }
   }
 
@@ -115,7 +128,6 @@ export function createCrossAppSync(config: CrossAppSyncConfig) {
     const sub = {
       topic,
       callback: onSync,
-      lastSync: lastKnown[topic || 'tasks'],
     };
     subscribers.push(sub);
     pollListeners += 1;

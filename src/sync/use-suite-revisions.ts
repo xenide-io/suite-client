@@ -64,18 +64,24 @@ export function useSuiteRevisions(options: {
     // A workspace change is not a cold load: every topic for the new scope is stale.
     let ready = switching;
     let timer: number | undefined;
+    let inFlight = false;
+    let disposed = false;
 
     const tick = async () => {
-      let data: Partial<SuiteRevisionMap> | null = null;
+      if (inFlight || disposed) return;
+      inFlight = true;
       try {
-        data = await loadRef.current();
+        const data = await loadRef.current();
+        if (disposed) return;
+        const step = nextRevisionTick(seen, ready, data);
+        seen = step.seen;
+        ready = step.ready;
+        for (const topic of step.changed) onTopicRef.current(topic);
       } catch {
-        return;
+        // A failed read leaves the previous baseline intact.
+      } finally {
+        inFlight = false;
       }
-      const step = nextRevisionTick(seen, ready, data);
-      seen = step.seen;
-      ready = step.ready;
-      for (const topic of step.changed) onTopicRef.current(topic);
     };
 
     const stop = () => {
@@ -94,6 +100,7 @@ export function useSuiteRevisions(options: {
     if (document.visibilityState === 'visible') start();
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      disposed = true;
       stop();
       document.removeEventListener('visibilitychange', onVisibility);
     };

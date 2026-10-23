@@ -80,6 +80,7 @@ export function createApiClient(config: ApiClientConfig) {
   let refreshToken: string | null = null;
   let activeWorkspaceId: string | null = null;
   const etagBodies = new Map<string, { etag: string; body: string }>();
+  const pendingGets = new Map<string, Promise<Response>>();
 
   let authFailureHandler: (() => void) | null = null;
   let authFailureFired = false;
@@ -240,6 +241,7 @@ export function createApiClient(config: ApiClientConfig) {
     refreshToken = null;
     activeWorkspaceId = null;
     etagBodies.clear();
+    pendingGets.clear();
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(ACCESS_KEY);
       window.localStorage.removeItem(REFRESH_KEY);
@@ -315,6 +317,37 @@ export function createApiClient(config: ApiClientConfig) {
   }
 
   async function apiFetch(
+    path: string,
+    init: ApiFetchInit = {},
+  ): Promise<Response> {
+    if ((init.method ?? 'GET').toUpperCase() !== 'GET') {
+      // A read after a write must not join a pre-mutation request.
+      pendingGets.clear();
+      try {
+        return await apiFetchInternal(path, init);
+      } finally {
+        pendingGets.clear();
+      }
+    }
+    // Explicit options (especially AbortSignal) belong to their caller.
+    if (Object.keys(init).length > 0) return apiFetchInternal(path, init);
+    const key = JSON.stringify([
+      getAccessToken(),
+      getActiveWorkspaceId(),
+      path,
+    ]);
+    let pending = pendingGets.get(key);
+    if (!pending) {
+      pending = apiFetchInternal(path, init).finally(() => {
+        if (pendingGets.get(key) === pending) pendingGets.delete(key);
+      });
+      pendingGets.set(key, pending);
+    }
+    // Responses have single-use bodies; each consumer gets its own copy.
+    return (await pending).clone();
+  }
+
+  async function apiFetchInternal(
     path: string,
     init: ApiFetchInit = {},
   ): Promise<Response> {
