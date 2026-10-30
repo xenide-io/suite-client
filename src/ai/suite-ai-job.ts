@@ -15,7 +15,7 @@ export type SuiteAiJobEvent = {
 
 export type SuiteAiJob = {
   id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
   events: SuiteAiJobEvent[];
 };
 
