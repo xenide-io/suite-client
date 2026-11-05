@@ -14,7 +14,13 @@ const posthog = vi.hoisted(() => ({
 
 vi.mock('posthog-js', () => ({ default: posthog }));
 
-import { createAnalyticsClient, emailDomain } from './analytics';
+import { createAnalyticsClient, emailDomain, ANALYTICS_CONSENT_REQUIRED } from './analytics';
+
+describe('consent flag', () => {
+  it('documents that no consent gate exists yet', () => {
+    expect(ANALYTICS_CONSENT_REQUIRED).toBe(false);
+  });
+});
 
 describe('createAnalyticsClient', () => {
   beforeEach(() => {
@@ -50,7 +56,8 @@ describe('createAnalyticsClient', () => {
         person_profiles: 'identified_only',
         autocapture: true,
         capture_pageview: false,
-        capture_pageleave: false,
+        capture_pageleave: true,
+        disable_session_recording: true,
         persistence: 'localStorage+cookie',
         cross_subdomain_cookie: true,
       }),
@@ -83,6 +90,68 @@ describe('createAnalyticsClient', () => {
     expect(analytics.getContextHeaders()).toEqual({
       'X-POSTHOG-DISTINCT-ID': 'distinct-123',
       'X-POSTHOG-SESSION-ID': 'session-456',
+    });
+  });
+
+  it('emits at most one pageview per URL inside the guard window', () => {
+    vi.useFakeTimers();
+    try {
+      const analytics = createAnalyticsClient({
+        app: 'turtletime',
+        apiKey: 'phc_test',
+      });
+      analytics.pageview();
+      analytics.pageview();
+      expect(posthog.capture).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(501);
+      analytics.pageview();
+      expect(posthog.capture).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emits a lifecycle action once within the dedupe window', () => {
+    vi.useFakeTimers();
+    try {
+      const analytics = createAnalyticsClient({
+        app: 'shellstack',
+        apiKey: 'phc_test',
+      });
+      analytics.capture('User Logged Out', { origin: 'api_client' });
+      analytics.capture('User Logged Out', { origin: 'sidebar' });
+
+      expect(posthog.capture).toHaveBeenCalledTimes(1);
+      expect(posthog.capture).toHaveBeenCalledWith('User Logged Out', {
+        origin: 'api_client',
+        action_id: expect.any(String),
+      });
+
+      vi.advanceTimersByTime(501);
+      analytics.capture('User Logged Out', { origin: 'sidebar' });
+      expect(posthog.capture).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not dedupe repeatable app-owned actions and keeps explicit action ids', () => {
+    const analytics = createAnalyticsClient({ app: 'tides', apiKey: 'phc_test' });
+    analytics.capture('Task Created', { operation: 'create' });
+    analytics.capture('Task Created', { operation: 'create' });
+    analytics.capture('Theme Updated', { theme: 'dark' });
+    analytics.capture('Theme Updated', { theme: 'light' });
+    analytics.capture('Theme Updated', { theme: 'light', action_id: 'action-1' });
+
+    expect(posthog.capture).toHaveBeenCalledTimes(5);
+    expect(posthog.capture).toHaveBeenNthCalledWith(3, 'Theme Updated', {
+      theme: 'dark',
+      action_id: expect.any(String),
+    });
+    expect(posthog.capture).toHaveBeenNthCalledWith(5, 'Theme Updated', {
+      theme: 'light',
+      action_id: 'action-1',
     });
   });
 
