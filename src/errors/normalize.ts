@@ -107,6 +107,20 @@ export async function appErrorFromResponse(
   return normalizeError(body, fallback, capability);
 }
 
+/**
+ * Read a 2xx body as JSON. A body that cannot be parsed is a contract mismatch,
+ * never a raw `SyntaxError` shown to the user.
+ */
+export async function readJson<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(formatAppError(build(ERROR_CODES.CLIENT_002)));
+  }
+}
+
 /** Normalise a thrown fetch failure: offline, aborted, or unreachable. */
 export function normalizeThrown(input: unknown, capability?: string): AppError {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {

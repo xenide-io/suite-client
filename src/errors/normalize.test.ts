@@ -4,6 +4,8 @@ import {
   appErrorFromResponse,
   formatAppError,
   normalizeError,
+  normalizeThrown,
+  readJson,
 } from './normalize';
 
 describe('normalizeError', () => {
@@ -38,5 +40,30 @@ describe('appErrorFromResponse', () => {
     const response = new Response('nope', { status: 404 });
     const error = await appErrorFromResponse(response);
     expect(error.code).toBe(ERROR_CODES.DATA_001);
+  });
+});
+
+describe('normalizeThrown', () => {
+  it('maps an offline browser to the device-offline code', () => {
+    const original = navigator.onLine;
+    Object.defineProperty(navigator, 'onLine', { value: false, configurable: true });
+    try {
+      expect(normalizeThrown(new TypeError('fetch failed')).code).toBe(
+        ERROR_CODES.CLIENT_001,
+      );
+    } finally {
+      Object.defineProperty(navigator, 'onLine', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
+});
+
+describe('readJson', () => {
+  it('maps an unreadable success body to the contract-mismatch code', async () => {
+    await expect(readJson(new Response('{not json', { status: 200 }))).rejects.toThrow(
+      `(Reference: ${ERROR_CODES.CLIENT_002})`,
+    );
   });
 });

@@ -1,4 +1,8 @@
-import { appErrorFromResponse, formatAppError } from '../errors/normalize';
+import {
+  appErrorFromResponse,
+  formatAppError,
+  normalizeThrown,
+} from '../errors/normalize';
 
 export type ApiFetchInit = RequestInit & { skipAuth?: boolean };
 
@@ -404,9 +408,7 @@ export function createApiClient(config: ApiClientConfig) {
         ) {
           throw error;
         }
-        throw new Error(
-          `Could not reach the API at ${API_URL}. Is the Django backend running?`,
-        );
+        throw new Error(formatAppError(normalizeThrown(error)));
       }
     }
 

@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { appErrorFromResponse, formatAppError } from "../errors/normalize";
 import { companionActivity, type CompanionActivity } from "./companion";
 import { activeSuiteAiJobs, type SuiteAiJob } from "./suite-ai-job";
 
@@ -18,14 +19,8 @@ type ChatApi = {
 
 async function checked(response: Response): Promise<Response> {
   if (response.ok) return response;
-  let message = `Request failed (${response.status})`;
-  try {
-    const data = (await response.json()) as { error?: string; detail?: string };
-    message = data.error || data.detail || message;
-  } catch {
-    /* retain status if the server did not return JSON */
-  }
-  throw new Error(message);
+  // Never render upstream text or a status number: normalise, then show the code.
+  throw new Error(formatAppError(await appErrorFromResponse(response)));
 }
 
 /** Mount once per authenticated account/scope. Hosts retain JWTs and workspace/org headers. */
