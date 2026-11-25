@@ -151,6 +151,7 @@ export type AnalyticsEventName =
   | "Proposal Applied"
   | "Proposal Generated"
   | "Proposal Rejected"
+  | "Public Share Rotated"
   | "Public Share Toggled"
   | "Push Notifications Configured"
   | "Report CSV Downloaded"
@@ -1537,6 +1538,12 @@ export const ANALYTICS_EVENTS: Record<
     category: "Shelly — AI workforce",
     apps: ["shelly"],
     source: ["client", "server"],
+    status: "implemented",
+  },
+  "Public Share Rotated": {
+    category: "Kraken — documents & deep search",
+    apps: ["kraken"],
+    source: ["server"],
     status: "implemented",
   },
   "Public Share Toggled": {
